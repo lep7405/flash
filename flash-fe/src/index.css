@@ -1,0 +1,66 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;700&display=swap');
+
+:root {
+  --bg: #f6efe6;
+  --bg-deep: #ead8c7;
+  --surface: rgba(255, 250, 244, 0.92);
+  --ink: #20120c;
+  --muted: #6f5a4f;
+  --line: rgba(56, 29, 16, 0.1);
+  --accent: #ef6c3d;
+  --accent-dark: #cb4d1d;
+  --accent-soft: rgba(255, 212, 196, 0.9);
+  --shadow: 0 24px 80px rgba(89, 54, 36, 0.12);
+  --font-body: 'Space Grotesk', 'Trebuchet MS', sans-serif;
+  --font-mono: 'IBM Plex Mono', 'Courier New', monospace;
+
+  color: var(--muted);
+  background:
+    radial-gradient(circle at top left, rgba(255, 177, 120, 0.45), transparent 28%),
+    radial-gradient(circle at top right, rgba(255, 230, 172, 0.55), transparent 20%),
+    linear-gradient(180deg, var(--bg), var(--bg-deep));
+  font-family: var(--font-body);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+body,
+button,
+input,
+textarea {
+  font-family: var(--font-body);
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  appearance: none;
+}
+
+img {
+  max-width: 100%;
+  display: block;
+}
+
+#root {
+  min-height: 100vh;
+}

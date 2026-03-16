@@ -60,6 +60,15 @@ class FlashController extends Controller
         ]);
     }
 
+    public function destroy(Flash $flash): JsonResponse
+    {
+        $flash->delete();
+
+        return response()->json([
+            'message' => 'Flash deleted successfully.',
+        ]);
+    }
+
     private function validateFlashPayload(Request $request): array
     {
         $validator = Validator::make($request->all(), [

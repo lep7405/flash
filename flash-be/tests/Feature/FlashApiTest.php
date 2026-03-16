@@ -172,4 +172,31 @@ class FlashApiTest extends TestCase
             'sentence' => 'old sentence',
         ]);
     }
+
+    public function test_it_deletes_an_existing_flash(): void
+    {
+        $flash = Flash::query()->create([
+            'vocabulary' => 'to-delete',
+            'pinyin' => 'xoa',
+        ]);
+        $flash->examples()->create([
+            'sentence' => 'delete me',
+            'pinyin' => null,
+            'translation_vi' => 'xoa di',
+        ]);
+
+        $response = $this->deleteJson("/api/flashes/{$flash->id}");
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('message', 'Flash deleted successfully.');
+
+        $this->assertDatabaseMissing('flashes', [
+            'id' => $flash->id,
+        ]);
+        $this->assertDatabaseMissing('flash_examples', [
+            'flash_id' => $flash->id,
+            'sentence' => 'delete me',
+        ]);
+    }
 }

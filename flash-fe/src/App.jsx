@@ -109,6 +109,7 @@ function App() {
   const [notice, setNotice] = useState(null)
   const [isLoadingList, setIsLoadingList] = useState(true)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [deletingFlashId, setDeletingFlashId] = useState(null)
   const [copyState, setCopyState] = useState('idle')
 
   async function refreshRecentFlashes(showLoader = true) {
@@ -354,6 +355,52 @@ function App() {
     window.setTimeout(() => {
       setCopyState('idle')
     }, 1800)
+  }
+
+  async function handleDeleteFlash(flash) {
+    const isConfirmed = window.confirm(
+      `Xóa flash "${flash.vocabulary}"? Hành động này không thể hoàn tác.`,
+    )
+
+    if (!isConfirmed) {
+      return
+    }
+
+    setDeletingFlashId(flash.id)
+    setNotice(null)
+
+    try {
+      const response = await fetch(`${API_ROOT}/flashes/${flash.id}`, {
+        method: 'DELETE',
+        headers: {
+          Accept: 'application/json',
+        },
+      })
+
+      const payloadResponse = await response.json().catch(() => ({}))
+
+      if (!response.ok) {
+        throw new Error(payloadResponse.message || 'Không xóa được flash.')
+      }
+
+      if (editingFlashId === flash.id) {
+        resetComposer(activeGroupId)
+      }
+
+      setRecentFlashes((current) => current.filter((item) => item.id !== flash.id))
+      setRevealedFlashIds((current) => current.filter((id) => id !== flash.id))
+      setNotice({
+        type: 'success',
+        text: `Đã xóa flash "${flash.vocabulary}".`,
+      })
+    } catch (error) {
+      setNotice({
+        type: 'error',
+        text: error.message || 'Không xóa được flash.',
+      })
+    } finally {
+      setDeletingFlashId(null)
+    }
   }
 
   return (
@@ -724,8 +771,17 @@ function App() {
                         type="button"
                         className="secondary-button flash-card__button"
                         onClick={() => startEditingFlash(flash)}
+                        disabled={deletingFlashId === flash.id}
                       >
                         Edit
+                      </button>
+                      <button
+                        type="button"
+                        className="danger-button flash-card__button"
+                        onClick={() => handleDeleteFlash(flash)}
+                        disabled={deletingFlashId === flash.id}
+                      >
+                        {deletingFlashId === flash.id ? 'Đang xóa...' : 'Xóa'}
                       </button>
                     </div>
                   </article>

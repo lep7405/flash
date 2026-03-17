@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import './App.css'
 
 const API_ROOT = (import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '')
+const ALL_GROUP_FILTER = '__all__'
+const UNGROUPED_GROUP_FILTER = '__ungrouped__'
 
 const emptyExample = {
   sentence: '',
@@ -71,8 +73,18 @@ function buildFlashPayload(draft) {
   return payload
 }
 
-async function fetchRecentFlashes() {
-  const response = await fetch(`${API_ROOT}/flashes?limit=24`, {
+async function fetchRecentFlashes(groupFilter = ALL_GROUP_FILTER) {
+  const query = new URLSearchParams({
+    limit: '24',
+  })
+
+  if (groupFilter === UNGROUPED_GROUP_FILTER) {
+    query.set('ungrouped', '1')
+  } else if (groupFilter !== ALL_GROUP_FILTER) {
+    query.set('group_id', groupFilter)
+  }
+
+  const response = await fetch(`${API_ROOT}/flashes?${query.toString()}`, {
     headers: {
       Accept: 'application/json',
     },
@@ -83,7 +95,18 @@ async function fetchRecentFlashes() {
   }
 
   const payload = await response.json()
-  return Array.isArray(payload.data) ? payload.data : []
+  return {
+    flashes: Array.isArray(payload.data) ? payload.data : [],
+    groups: Array.isArray(payload.groups)
+      ? payload.groups
+          .map((group) => ({
+            id: typeof group.id === 'string' ? group.id : '',
+            flashCount: Number(group.flash_count) || 0,
+          }))
+          .filter((group) => group.id)
+      : [],
+    ungroupedCount: Number(payload.ungrouped_count) || 0,
+  }
 }
 
 function formatFlashTime(value) {
@@ -102,6 +125,9 @@ function formatFlashTime(value) {
 function App() {
   const [draft, setDraft] = useState(emptyDraft)
   const [recentFlashes, setRecentFlashes] = useState([])
+  const [groupFilters, setGroupFilters] = useState([])
+  const [ungroupedFlashCount, setUngroupedFlashCount] = useState(0)
+  const [selectedGroupFilter, setSelectedGroupFilter] = useState(ALL_GROUP_FILTER)
   const [activeGroupId, setActiveGroupId] = useState('')
   const [editingFlashId, setEditingFlashId] = useState(null)
   const [viewMode, setViewMode] = useState('builder')
@@ -113,13 +139,19 @@ function App() {
   const [isImporting, setIsImporting] = useState(false)
   const [copyState, setCopyState] = useState('idle')
 
-  async function refreshRecentFlashes(showLoader = true) {
+  function applyFlashListResponse(payload) {
+    setRecentFlashes(payload.flashes)
+    setGroupFilters(payload.groups)
+    setUngroupedFlashCount(payload.ungroupedCount)
+  }
+
+  async function refreshRecentFlashes(showLoader = true, groupFilter = selectedGroupFilter) {
     if (showLoader) {
       setIsLoadingList(true)
     }
 
     try {
-      setRecentFlashes(await fetchRecentFlashes())
+      applyFlashListResponse(await fetchRecentFlashes(groupFilter))
     } catch (error) {
       setNotice((current) => {
         if (current?.type === 'success') {
@@ -145,13 +177,15 @@ function App() {
       setIsLoadingList(true)
 
       try {
-        const flashes = await fetchRecentFlashes()
+        const payload = await fetchRecentFlashes(ALL_GROUP_FILTER)
 
         if (!isMounted) {
           return
         }
 
-        setRecentFlashes(flashes)
+        setRecentFlashes(payload.flashes)
+        setGroupFilters(payload.groups)
+        setUngroupedFlashCount(payload.ungroupedCount)
       } catch (error) {
         if (!isMounted) {
           return
@@ -247,7 +281,7 @@ function App() {
 
   function openStudyView() {
     setViewMode('study')
-    refreshRecentFlashes(false)
+    refreshRecentFlashes(false, selectedGroupFilter)
     window.scrollTo({
       top: 0,
       behavior: 'smooth',
@@ -277,7 +311,96 @@ function App() {
     )
   }
 
+  function handleGroupFilterChange(groupFilter) {
+    setSelectedGroupFilter(groupFilter)
+    setRevealedFlashIds([])
+    refreshRecentFlashes(true, groupFilter)
+  }
+
   const isEditing = editingFlashId !== null
+  const totalFlashCount =
+    groupFilters.reduce((sum, group) => sum + group.flashCount, 0) + ungroupedFlashCount
+  const availableGroupFilters = [...groupFilters]
+
+  if (
+    selectedGroupFilter !== ALL_GROUP_FILTER &&
+    selectedGroupFilter !== UNGROUPED_GROUP_FILTER &&
+    !availableGroupFilters.some((group) => group.id === selectedGroupFilter)
+  ) {
+    availableGroupFilters.unshift({
+      id: selectedGroupFilter,
+      flashCount: recentFlashes.length,
+    })
+  }
+
+  function formatGroupFilterLabel(groupFilter) {
+    if (groupFilter === ALL_GROUP_FILTER) {
+      return 'Tất cả'
+    }
+
+    if (groupFilter === UNGROUPED_GROUP_FILTER) {
+      return 'Flash lẻ'
+    }
+
+    return groupFilter
+  }
+
+  function renderGroupFilters() {
+    if (totalFlashCount === 0) {
+      return null
+    }
+
+    return (
+      <div className="group-filter-panel">
+        <div className="group-filter-panel__head">
+          <div>
+            <p className="section-kicker">Bộ lọc group</p>
+            <h3>Lọc nhanh theo nhóm flash</h3>
+          </div>
+          <p className="group-filter-panel__meta">
+            Đang chọn: <strong>{formatGroupFilterLabel(selectedGroupFilter)}</strong>
+          </p>
+        </div>
+
+        <div className="group-filter-list">
+          <button
+            type="button"
+            className={`group-filter-chip ${selectedGroupFilter === ALL_GROUP_FILTER ? 'group-filter-chip--active' : ''}`}
+            onClick={() => handleGroupFilterChange(ALL_GROUP_FILTER)}
+            disabled={isLoadingList}
+          >
+            <span>Tất cả</span>
+            <strong>{totalFlashCount}</strong>
+          </button>
+
+          {(ungroupedFlashCount > 0 || selectedGroupFilter === UNGROUPED_GROUP_FILTER) && (
+            <button
+              type="button"
+              className={`group-filter-chip ${selectedGroupFilter === UNGROUPED_GROUP_FILTER ? 'group-filter-chip--active' : ''}`}
+              onClick={() => handleGroupFilterChange(UNGROUPED_GROUP_FILTER)}
+              disabled={isLoadingList}
+            >
+              <span>Flash lẻ</span>
+              <strong>{ungroupedFlashCount}</strong>
+            </button>
+          )}
+
+          {availableGroupFilters.map((group) => (
+            <button
+              type="button"
+              key={group.id}
+              className={`group-filter-chip ${selectedGroupFilter === group.id ? 'group-filter-chip--active' : ''}`}
+              onClick={() => handleGroupFilterChange(group.id)}
+              disabled={isLoadingList}
+            >
+              <span>{group.id}</span>
+              <strong>{group.flashCount}</strong>
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+  }
 
   async function handleSubmit(event) {
     event.preventDefault()
@@ -388,8 +511,8 @@ function App() {
         resetComposer(activeGroupId)
       }
 
-      setRecentFlashes((current) => current.filter((item) => item.id !== flash.id))
       setRevealedFlashIds((current) => current.filter((id) => id !== flash.id))
+      await refreshRecentFlashes(false, selectedGroupFilter)
       setNotice({
         type: 'success',
         text: `Đã xóa flash "${flash.vocabulary}".`,
@@ -787,6 +910,8 @@ function App() {
             </aside>
           </section>
 
+          {renderGroupFilters()}
+
           <section className="panel recent-panel">
             <div className="section-heading">
               <div>
@@ -807,7 +932,9 @@ function App() {
               <p className="empty-state">Đang tải danh sách flash...</p>
             ) : recentFlashes.length === 0 ? (
               <p className="empty-state">
-                Chưa có flash nào. Tạo flash đầu tiên ở form phía trên.
+                {selectedGroupFilter === ALL_GROUP_FILTER
+                  ? 'Chưa có flash nào. Tạo flash đầu tiên ở form phía trên.'
+                  : `Chưa có flash nào thuộc bộ lọc ${formatGroupFilterLabel(selectedGroupFilter)}.`}
               </p>
             ) : (
               <div className="flash-grid">
@@ -895,11 +1022,15 @@ function App() {
             </div>
           </div>
 
+          {renderGroupFilters()}
+
           {isLoadingList ? (
             <p className="empty-state">Đang tải danh sách flash...</p>
           ) : recentFlashes.length === 0 ? (
             <p className="empty-state">
-              Chưa có flash nào để học. Quay lại trang tạo flash trước.
+              {selectedGroupFilter === ALL_GROUP_FILTER
+                ? 'Chưa có flash nào để học. Quay lại trang tạo flash trước.'
+                : `Chưa có flash nào thuộc bộ lọc ${formatGroupFilterLabel(selectedGroupFilter)}.`}
             </p>
           ) : (
             <div className="study-grid">

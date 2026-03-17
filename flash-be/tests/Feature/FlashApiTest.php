@@ -99,9 +99,14 @@ class FlashApiTest extends TestCase
 
     public function test_it_lists_recent_flashes(): void
     {
+        FlashGroup::query()->create([
+            'id' => 'group-001',
+        ]);
+
         Flash::query()->create([
             'vocabulary' => 'hao',
             'pinyin' => 'hao',
+            'group_id' => 'group-001',
         ])->examples()->create([
             'sentence' => 'Hao jiu bu jian.',
             'pinyin' => 'Hǎo jiǔ bú jiàn.',
@@ -114,7 +119,56 @@ class FlashApiTest extends TestCase
             ->assertOk()
             ->assertJsonCount(1, 'data')
             ->assertJsonPath('data.0.vocabulary', 'hao')
-            ->assertJsonPath('data.0.examples.0.translation_vi', 'Lâu rồi không gặp.');
+            ->assertJsonPath('data.0.examples.0.translation_vi', 'Lâu rồi không gặp.')
+            ->assertJsonPath('groups.0.id', 'group-001')
+            ->assertJsonPath('groups.0.flash_count', 1)
+            ->assertJsonPath('ungrouped_count', 0);
+    }
+
+    public function test_it_filters_flashes_by_group_and_ungrouped_state(): void
+    {
+        FlashGroup::query()->create([
+            'id' => 'group-001',
+        ]);
+        FlashGroup::query()->create([
+            'id' => 'group-002',
+        ]);
+
+        Flash::query()->create([
+            'vocabulary' => 'hao',
+            'pinyin' => 'hao',
+            'group_id' => 'group-001',
+        ]);
+        Flash::query()->create([
+            'vocabulary' => 'xie xie',
+            'pinyin' => 'xie xie',
+            'group_id' => 'group-002',
+        ]);
+        Flash::query()->create([
+            'vocabulary' => 'zaijian',
+            'pinyin' => 'zaijian',
+            'group_id' => null,
+        ]);
+
+        $groupResponse = $this->getJson('/api/flashes?group_id=group-001');
+
+        $groupResponse
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.vocabulary', 'hao')
+            ->assertJsonPath('data.0.group_id', 'group-001')
+            ->assertJsonPath('groups.0.id', 'group-001')
+            ->assertJsonPath('groups.1.id', 'group-002')
+            ->assertJsonPath('ungrouped_count', 1);
+
+        $ungroupedResponse = $this->getJson('/api/flashes?ungrouped=1');
+
+        $ungroupedResponse
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.vocabulary', 'zaijian')
+            ->assertJsonPath('data.0.group_id', null)
+            ->assertJsonPath('ungrouped_count', 1);
     }
 
     public function test_it_updates_an_existing_flash(): void
@@ -247,7 +301,7 @@ class FlashApiTest extends TestCase
         ]);
     }
 
-    public function test_it_rejects_group_conflicts_with_row_numbers_before_writing_to_db(): void
+    public function test_it_imports_same_vocabulary_into_multiple_groups_as_separate_flashes(): void
     {
         $csv = implode("\n", [
             'vocabulary,pinyin,group_id,example_sentence,example_pinyin,example_translation_vi',
@@ -267,16 +321,32 @@ class FlashApiTest extends TestCase
         ]);
 
         $response
-            ->assertStatus(422)
-            ->assertJsonPath('conflicts.0.vocabulary', '你好')
-            ->assertJsonPath('conflicts.0.rows.0', 2)
-            ->assertJsonPath('conflicts.0.rows.1', 3);
+            ->assertCreated()
+            ->assertJsonPath('created', 2)
+            ->assertJsonPath('merged', 0)
+            ->assertJsonPath('examples_created', 2)
+            ->assertJsonPath('skipped', 0);
 
-        $this->assertSame(0, Flash::query()->count());
-        $this->assertSame(0, FlashGroup::query()->count());
+        $this->assertSame(2, Flash::query()->count());
+        $this->assertDatabaseHas('flashes', [
+            'vocabulary' => '你好',
+            'group_id' => 'group-001',
+        ]);
+        $this->assertDatabaseHas('flashes', [
+            'vocabulary' => '你好',
+            'group_id' => 'group-009',
+        ]);
+        $this->assertDatabaseHas('flash_examples', [
+            'sentence' => '你好嗎？',
+            'translation_vi' => 'Bạn khỏe không?',
+        ]);
+        $this->assertDatabaseHas('flash_examples', [
+            'sentence' => '很高興認識你。',
+            'translation_vi' => 'Rất vui được gặp bạn.',
+        ]);
     }
 
-    public function test_it_uses_existing_db_group_id_when_import_group_id_differs(): void
+    public function test_it_merges_existing_flash_only_when_vocabulary_and_group_id_both_match(): void
     {
         FlashGroup::query()->create([
             'id' => 'group-db',
@@ -293,6 +363,7 @@ class FlashApiTest extends TestCase
 
         $csv = implode("\n", [
             'vocabulary,pinyin,group_id,example_sentence,example_pinyin,example_translation_vi',
+            '你好,nǐ hǎo,group-db,謝謝你。,Xiè xie nǐ.,Cảm ơn bạn.',
             '你好,nǐ hǎo,group-import,你好嗎？,Nǐ hǎo ma?,Bạn khỏe không?',
         ]);
 
@@ -309,15 +380,30 @@ class FlashApiTest extends TestCase
 
         $response
             ->assertCreated()
-            ->assertJsonPath('created', 0)
+            ->assertJsonPath('created', 1)
             ->assertJsonPath('merged', 1)
-            ->assertJsonPath('examples_created', 1);
+            ->assertJsonPath('examples_created', 2);
 
         $flash->refresh();
 
         $this->assertSame('group-db', $flash->group_id);
         $this->assertDatabaseHas('flash_examples', [
             'flash_id' => $flash->id,
+            'sentence' => '謝謝你。',
+            'translation_vi' => 'Cảm ơn bạn.',
+        ]);
+        $this->assertDatabaseHas('flashes', [
+            'vocabulary' => '你好',
+            'group_id' => 'group-import',
+        ]);
+
+        $importFlash = Flash::query()
+            ->where('vocabulary', '你好')
+            ->where('group_id', 'group-import')
+            ->firstOrFail();
+
+        $this->assertDatabaseHas('flash_examples', [
+            'flash_id' => $importFlash->id,
             'sentence' => '你好嗎？',
             'translation_vi' => 'Bạn khỏe không?',
         ]);

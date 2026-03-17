@@ -16,6 +16,8 @@ use RuntimeException;
 
 class FlashController extends Controller
 {
+    private const SPREADSHEET_MAIN_NAMESPACE = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+
     private const IMPORT_HEADERS = [
         'vocabulary',
         'pinyin',
@@ -28,17 +30,45 @@ class FlashController extends Controller
     public function index(Request $request): JsonResponse
     {
         $limit = min(max($request->integer('limit', 12), 1), 50);
+        $groupId = $this->nullableTrim($request->query('group_id'));
+        $ungroupedOnly = $request->boolean('ungrouped');
 
-        $flashes = Flash::query()
+        $flashesQuery = Flash::query()
             ->with('examples')
-            ->latest()
+            ->latest();
+
+        if ($ungroupedOnly) {
+            $flashesQuery->whereNull('group_id');
+        } elseif ($groupId !== null) {
+            $flashesQuery->where('group_id', $groupId);
+        }
+
+        $flashes = $flashesQuery
             ->limit($limit)
             ->get()
             ->map(fn (Flash $flash) => $this->flashPayload($flash))
             ->all();
 
+        $groups = Flash::query()
+            ->select('group_id', DB::raw('COUNT(*) as flash_count'))
+            ->whereNotNull('group_id')
+            ->groupBy('group_id')
+            ->orderBy('group_id')
+            ->get()
+            ->map(fn (Flash $flash) => [
+                'id' => $flash->group_id,
+                'flash_count' => (int) ($flash->flash_count ?? 0),
+            ])
+            ->all();
+
+        $ungroupedCount = Flash::query()
+            ->whereNull('group_id')
+            ->count();
+
         return response()->json([
             'data' => $flashes,
+            'groups' => $groups,
+            'ungrouped_count' => $ungroupedCount,
         ]);
     }
 
@@ -128,51 +158,32 @@ class FlashController extends Controller
         $skippedCount = 0;
 
         try {
-            info('row',[
-               'data' => $dataRows,
-            ]);
-            $groupedVocabulary = $this->groupImportRows($dataRows, $skippedCount);
+            $groupedFlashes = $this->groupImportRows($dataRows, $skippedCount);
         } catch (RuntimeException $exception) {
             return response()->json([
                 'message' => $exception->getMessage(),
             ], 422);
         }
 
-        $conflicts = $this->detectImportGroupConflicts($groupedVocabulary);
+        DB::transaction(function () use ($groupedFlashes, &$createdCount, &$mergedCount, &$exampleCreatedCount): void {
+            $existingFlashes = $this->loadExistingFlashesByImportKey();
 
-        if ($conflicts !== []) {
-            return response()->json([
-                'message' => implode(' || ', array_map(
-                    fn (array $conflict): string => $conflict['message'],
-                    $conflicts,
-                )),
-                'conflicts' => $conflicts,
-            ], 422);
-        }
+            foreach ($groupedFlashes as $importKey => $group) {
+                $flash = $existingFlashes[$importKey] ?? null;
 
-        DB::transaction(function () use ($groupedVocabulary, &$createdCount, &$mergedCount, &$exampleCreatedCount): void {
-            $existingFlashes = $this->loadExistingFlashesByVocabularyKey();
-
-            foreach ($groupedVocabulary as $vocabularyKey => $group) {
-                $flash = $existingFlashes[$vocabularyKey] ?? null;
-                $resolvedGroupId = $this->resolveImportGroupId(
-                    dbGroupId: $flash?->group_id,
-                    importGroupId: $group['group_id'],
-                );
-
-                if ($resolvedGroupId !== null) {
-                    FlashGroup::query()->firstOrCreate(['id' => $resolvedGroupId]);
+                if ($group['group_id'] !== null) {
+                    FlashGroup::query()->firstOrCreate(['id' => $group['group_id']]);
                 }
 
                 if (! $flash) {
                     $flash = Flash::query()->create([
                         'vocabulary' => $group['vocabulary'],
                         'pinyin' => $group['pinyin'],
-                        'group_id' => $resolvedGroupId,
+                        'group_id' => $group['group_id'],
                     ]);
 
                     $flash->setRelation('examples', collect());
-                    $existingFlashes[$vocabularyKey] = $flash;
+                    $existingFlashes[$importKey] = $flash;
                     $createdCount++;
                 } else {
                     $mergedCount++;
@@ -180,10 +191,6 @@ class FlashController extends Controller
 
                     if (($flash->pinyin === null || trim((string) $flash->pinyin) === '') && $group['pinyin'] !== null) {
                         $updates['pinyin'] = $group['pinyin'];
-                    }
-
-                    if ($resolvedGroupId !== $flash->group_id) {
-                        $updates['group_id'] = $resolvedGroupId;
                     }
 
                     if ($updates !== []) {
@@ -391,7 +398,7 @@ class FlashController extends Controller
 
     private function groupImportRows(array $dataRows, int &$skippedCount): array
     {
-        $groupedVocabulary = [];
+        $groupedFlashes = [];
 
         foreach ($dataRows as $index => $cells) {
             $line = $index + 2;
@@ -426,43 +433,26 @@ class FlashController extends Controller
                 );
             }
 
-            $vocabularyKey = $this->normalizeVocabularyKey($vocabulary);
-            info('vocabulary: ' . $vocabulary);
+            $importKey = $this->buildImportFlashKey($vocabulary, $groupId);
 
-            if (! isset($groupedVocabulary[$vocabularyKey])) {
-                $groupedVocabulary[$vocabularyKey] = [
+            if (! isset($groupedFlashes[$importKey])) {
+                $groupedFlashes[$importKey] = [
                     'vocabulary' => $vocabulary,
                     'rows' => [],
-                    'group_ids' => [],
-                    'group_id' => null,
+                    'group_id' => $groupId,
                     'pinyin' => null,
                     'examples' => [],
                 ];
             }
-            info('$groupedVocabulary: ',[
-                '$groupedVocabulary' => $groupedVocabulary,
-            ]);
 
-            $groupedVocabulary[$vocabularyKey]['rows'][] = $line;
+            $groupedFlashes[$importKey]['rows'][] = $line;
 
-            if ($groupedVocabulary[$vocabularyKey]['pinyin'] === null && $pinyin !== null) {
-                $groupedVocabulary[$vocabularyKey]['pinyin'] = $pinyin;
-            }
-
-            if ($groupId !== null) {
-                if (! isset($groupedVocabulary[$vocabularyKey]['group_ids'][$groupId])) {
-                    $groupedVocabulary[$vocabularyKey]['group_ids'][$groupId] = [];
-                }
-
-                $groupedVocabulary[$vocabularyKey]['group_ids'][$groupId][] = $line;
-
-                if ($groupedVocabulary[$vocabularyKey]['group_id'] === null) {
-                    $groupedVocabulary[$vocabularyKey]['group_id'] = $groupId;
-                }
+            if ($groupedFlashes[$importKey]['pinyin'] === null && $pinyin !== null) {
+                $groupedFlashes[$importKey]['pinyin'] = $pinyin;
             }
 
             if ($exampleSentence !== null) {
-                $groupedVocabulary[$vocabularyKey]['examples'][] = [
+                $groupedFlashes[$importKey]['examples'][] = [
                     'line' => $line,
                     'sentence' => $exampleSentence,
                     'pinyin' => $examplePinyin,
@@ -471,52 +461,26 @@ class FlashController extends Controller
             }
         }
 
-        return $groupedVocabulary;
+        return $groupedFlashes;
     }
 
-    private function detectImportGroupConflicts(array $groupedVocabulary): array
+    private function buildImportFlashKey(string $vocabulary, ?string $groupId): string
     {
-        $conflicts = [];
-
-        foreach ($groupedVocabulary as $group) {
-            if (count($group['group_ids']) <= 1) {
-                continue;
-            }
-
-            $parts = [];
-
-            foreach ($group['group_ids'] as $groupId => $lines) {
-                $parts[] = "{$groupId} (rows: ".implode(', ', $lines).')';
-            }
-
-            $conflicts[] = [
-                'vocabulary' => $group['vocabulary'],
-                'rows' => $group['rows'],
-                'message' => sprintf(
-                    'Vocabulary "%s" has multiple group_id values: %s',
-                    $group['vocabulary'],
-                    implode(' | ', $parts),
-                ),
-            ];
-        }
-
-        return $conflicts;
+        return json_encode([
+            $this->normalizeVocabularyKey($vocabulary),
+            $groupId,
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '';
     }
 
-    private function loadExistingFlashesByVocabularyKey(): array
+    private function loadExistingFlashesByImportKey(): array
     {
         $flashes = [];
 
         foreach (Flash::query()->with('examples')->get() as $flash) {
-            $flashes[$this->normalizeVocabularyKey($flash->vocabulary)] = $flash;
+            $flashes[$this->buildImportFlashKey($flash->vocabulary, $flash->group_id)] = $flash;
         }
 
         return $flashes;
-    }
-
-    private function resolveImportGroupId(?string $dbGroupId, ?string $importGroupId): ?string
-    {
-        return $dbGroupId ?? $importGroupId;
     }
 
     private function appendGroupedExamplesToFlash(Flash $flash, array $examples): int
@@ -637,16 +601,22 @@ class FlashController extends Controller
 
         $xml = simplexml_load_string($sheetXml);
 
-        if ($xml === false || ! isset($xml->sheetData)) {
+        if ($xml === false) {
+            throw new RuntimeException('Uploaded xlsx is invalid.');
+        }
+
+        $sheetDataNodes = $this->spreadsheetXPath($xml, '/s:worksheet/s:sheetData');
+
+        if ($sheetDataNodes === []) {
             throw new RuntimeException('Uploaded xlsx is invalid.');
         }
 
         $rows = [];
 
-        foreach ($xml->sheetData->row as $rowNode) {
+        foreach ($this->spreadsheetXPath($xml, '/s:worksheet/s:sheetData/s:row') as $rowNode) {
             $row = [];
 
-            foreach ($rowNode->c as $cell) {
+            foreach ($this->spreadsheetXPath($rowNode, './s:c') as $cell) {
                 $reference = (string) $cell['r'];
                 $columnIndex = $this->columnIndexFromReference($reference);
                 $row[$columnIndex] = $this->extractXlsxCellValue($cell, $sharedStrings);
@@ -683,17 +653,16 @@ class FlashController extends Controller
 
         $strings = [];
 
-        foreach ($xml->si as $item) {
-            if (isset($item->t)) {
-                $strings[] = (string) $item->t;
+        foreach ($this->spreadsheetXPath($xml, '/s:sst/s:si') as $item) {
+            $textNodes = $this->spreadsheetXPath($item, './s:t');
+
+            if ($textNodes !== []) {
+                $strings[] = implode('', array_map('strval', $textNodes));
                 continue;
             }
 
-            $text = '';
-            foreach ($item->r as $run) {
-                $text .= (string) $run->t;
-            }
-            $strings[] = $text;
+            $runTextNodes = $this->spreadsheetXPath($item, './s:r/s:t');
+            $strings[] = implode('', array_map('strval', $runTextNodes));
         }
 
         return $strings;
@@ -714,7 +683,8 @@ class FlashController extends Controller
     private function extractXlsxCellValue(\SimpleXMLElement $cell, array $sharedStrings): string
     {
         $type = (string) $cell['t'];
-        $raw = isset($cell->v) ? (string) $cell->v : '';
+        $valueNodes = $this->spreadsheetXPath($cell, './s:v');
+        $raw = $valueNodes === [] ? '' : (string) $valueNodes[0];
 
         if ($type === 's') {
             $sharedIndex = (int) $raw;
@@ -722,10 +692,25 @@ class FlashController extends Controller
             return (string) ($sharedStrings[$sharedIndex] ?? '');
         }
 
-        if ($type === 'inlineStr' && isset($cell->is->t)) {
-            return (string) $cell->is->t;
+        if ($type === 'inlineStr') {
+            $textNodes = $this->spreadsheetXPath($cell, './s:is/s:t');
+
+            if ($textNodes !== []) {
+                return implode('', array_map('strval', $textNodes));
+            }
+
+            $runTextNodes = $this->spreadsheetXPath($cell, './s:is/s:r/s:t');
+
+            return implode('', array_map('strval', $runTextNodes));
         }
 
         return $raw;
+    }
+
+    private function spreadsheetXPath(\SimpleXMLElement $element, string $expression): array
+    {
+        $element->registerXPathNamespace('s', self::SPREADSHEET_MAIN_NAMESPACE);
+
+        return $element->xpath($expression) ?: [];
     }
 }

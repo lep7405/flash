@@ -476,6 +476,104 @@
   gap: 20px;
 }
 
+.group-filter-panel {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 24px;
+  padding: 20px 22px;
+  border: 1px solid rgba(61, 33, 19, 0.08);
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at top left, rgba(255, 199, 165, 0.2), transparent 38%),
+    linear-gradient(180deg, rgba(255, 248, 241, 0.96), rgba(255, 252, 247, 0.98));
+  box-shadow: var(--shadow);
+}
+
+.group-filter-panel__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: end;
+}
+
+.group-filter-panel__head h3,
+.group-filter-panel__meta {
+  margin: 0;
+}
+
+.group-filter-panel__head h3 {
+  color: var(--ink);
+  font-size: 1.2rem;
+  letter-spacing: -0.03em;
+}
+
+.group-filter-panel__meta {
+  color: var(--muted);
+  line-height: 1.5;
+  text-align: right;
+}
+
+.group-filter-panel__meta strong {
+  color: var(--accent-dark);
+}
+
+.group-filter-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.group-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(61, 33, 19, 0.12);
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--ink);
+  cursor: pointer;
+  transition:
+    transform 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    background 0.2s ease;
+}
+
+.group-filter-chip:hover {
+  transform: translateY(-1px);
+  border-color: rgba(239, 108, 61, 0.36);
+}
+
+.group-filter-chip span,
+.group-filter-chip strong {
+  display: block;
+}
+
+.group-filter-chip span {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+
+.group-filter-chip strong {
+  min-width: 1.8rem;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: rgba(61, 33, 19, 0.08);
+  color: var(--accent-dark);
+  font-size: 0.82rem;
+}
+
+.group-filter-chip--active {
+  border-color: rgba(239, 108, 61, 0.46);
+  background: rgba(255, 221, 206, 0.92);
+  box-shadow: 0 14px 30px rgba(203, 77, 29, 0.12);
+}
+
 .empty-state {
   margin: 0;
   color: var(--muted);
@@ -698,6 +796,15 @@
   .topbar {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .group-filter-panel__head {
+    flex-direction: column;
+    align-items: start;
+  }
+
+  .group-filter-panel__meta {
+    text-align: left;
   }
 
   .group-options,

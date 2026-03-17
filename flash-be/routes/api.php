@@ -5,5 +5,6 @@ use Illuminate\Support\Facades\Route;
 
 Route::get('/flashes', [FlashController::class, 'index']);
 Route::post('/flashes', [FlashController::class, 'store']);
+Route::post('/flashes/import', [FlashController::class, 'import']);
 Route::put('/flashes/{flash}', [FlashController::class, 'update']);
 Route::delete('/flashes/{flash}', [FlashController::class, 'destroy']);

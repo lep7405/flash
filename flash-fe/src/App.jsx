@@ -110,6 +110,7 @@ function App() {
   const [isLoadingList, setIsLoadingList] = useState(true)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [deletingFlashId, setDeletingFlashId] = useState(null)
+  const [isImporting, setIsImporting] = useState(false)
   const [copyState, setCopyState] = useState('idle')
 
   async function refreshRecentFlashes(showLoader = true) {
@@ -400,6 +401,67 @@ function App() {
       })
     } finally {
       setDeletingFlashId(null)
+    }
+  }
+
+  async function handleImportFile(event) {
+    const file = event.target.files?.[0]
+
+    if (!file) {
+      return
+    }
+
+    setIsImporting(true)
+    setNotice(null)
+
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+
+      const response = await fetch(`${API_ROOT}/flashes/import`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+        },
+        body: formData,
+      })
+
+      const payloadResponse = await response.json().catch(() => ({}))
+
+      if (!response.ok) {
+        const conflicts = Array.isArray(payloadResponse.conflicts)
+          ? payloadResponse.conflicts
+          : []
+
+        if (conflicts.length > 0) {
+          const details = conflicts
+            .map((conflict) => {
+              const rows = Array.isArray(conflict.rows)
+                ? conflict.rows.join(', ')
+                : 'unknown'
+              return `${conflict.vocabulary} (rows: ${rows})`
+            })
+            .join(' | ')
+
+          throw new Error(`Import lỗi ở dòng: ${details}`)
+        }
+
+        throw new Error(payloadResponse.message || 'Import thất bại.')
+      }
+
+      setNotice({
+        type: 'success',
+        text: `Import thành công: tạo ${payloadResponse.created || 0} flash, cập nhật ${payloadResponse.merged || 0} flash, thêm ${payloadResponse.examples_created || 0} câu ví dụ, bỏ qua ${payloadResponse.skipped || 0} dòng trống.`,
+      })
+      await refreshRecentFlashes(false)
+    } catch (error) {
+      setNotice({
+        type: 'error',
+        text: error.message || 'Import thất bại.',
+      })
+    } finally {
+      event.target.value = ''
+      setIsImporting(false)
     }
   }
 
@@ -705,6 +767,22 @@ function App() {
                   <li>Hệ thống trả về một `group_id` random.</li>
                   <li>Tiếp tục tạo các flash sau với cùng `group_id` đó.</li>
                 </ol>
+              </div>
+
+              <div className="flow-card">
+                <p className="flow-card__title">Import Excel (bulk)</p>
+                <p className="import-hint">
+                  Header bắt buộc: `vocabulary,pinyin,group_id,example_sentence,example_pinyin,example_translation_vi`
+                </p>
+                <label className="import-button">
+                  <input
+                    type="file"
+                    accept=".xlsx,.csv"
+                    onChange={handleImportFile}
+                    disabled={isImporting}
+                  />
+                  {isImporting ? 'Đang import...' : 'Chọn file .xlsx hoặc .csv'}
+                </label>
               </div>
             </aside>
           </section>

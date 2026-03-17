@@ -165,8 +165,8 @@ class FlashController extends Controller
             ], 422);
         }
 
-        DB::transaction(function () use ($groupedFlashes, &$createdCount, &$mergedCount, &$exampleCreatedCount): void {
-            $existingFlashes = $this->loadExistingFlashesByImportKey();
+        $this->runWriteOperation(function () use ($groupedFlashes, &$createdCount, &$mergedCount, &$exampleCreatedCount): void {
+            $existingFlashes = $this->loadExistingFlashesByImportKey(array_keys($groupedFlashes));
 
             foreach ($groupedFlashes as $importKey => $group) {
                 $flash = $existingFlashes[$importKey] ?? null;
@@ -264,7 +264,7 @@ class FlashController extends Controller
 
     private function persistFlash(?Flash $flash = null, array $data = []): array
     {
-        return DB::transaction(function () use ($flash, $data): array {
+        return $this->runWriteOperation(function () use ($flash, $data): array {
             $group = null;
             $groupId = null;
 
@@ -308,6 +308,15 @@ class FlashController extends Controller
                 'group' => $group,
             ];
         });
+    }
+
+    private function runWriteOperation(callable $callback): mixed
+    {
+        if (DB::getDriverName() === 'sqlite') {
+            return $callback();
+        }
+
+        return DB::transaction($callback);
     }
 
     private function flashPayload(Flash $flash): array
@@ -472,12 +481,45 @@ class FlashController extends Controller
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '';
     }
 
-    private function loadExistingFlashesByImportKey(): array
+    private function loadExistingFlashesByImportKey(array $importKeys): array
     {
+        if ($importKeys === []) {
+            return [];
+        }
+
+        $importKeyLookup = array_fill_keys($importKeys, true);
+        $matchedFlashIdsByKey = [];
+
+        foreach (Flash::query()->select(['id', 'vocabulary', 'group_id'])->lazyById() as $flash) {
+            $importKey = $this->buildImportFlashKey($flash->vocabulary, $flash->group_id);
+
+            if (! isset($importKeyLookup[$importKey])) {
+                continue;
+            }
+
+            $matchedFlashIdsByKey[$importKey] = $flash->id;
+        }
+
+        if ($matchedFlashIdsByKey === []) {
+            return [];
+        }
+
+        $flashesById = Flash::query()
+            ->with('examples')
+            ->whereKey(array_values($matchedFlashIdsByKey))
+            ->get()
+            ->keyBy('id');
+
         $flashes = [];
 
-        foreach (Flash::query()->with('examples')->get() as $flash) {
-            $flashes[$this->buildImportFlashKey($flash->vocabulary, $flash->group_id)] = $flash;
+        foreach ($matchedFlashIdsByKey as $importKey => $flashId) {
+            $flash = $flashesById->get($flashId);
+
+            if ($flash === null) {
+                continue;
+            }
+
+            $flashes[$importKey] = $flash;
         }
 
         return $flashes;

@@ -126,43 +126,23 @@ class FlashController extends Controller
             ], 422);
         }
 
-        try {
-            $rows = $extension === 'csv'
-                ? $this->parseCsvRows($file)
-                : $this->parseXlsxRows($file);
-        } catch (RuntimeException $exception) {
-            return response()->json([
-                'message' => $exception->getMessage(),
-            ], 422);
-        }
-
-        if ($rows === []) {
-            return response()->json([
-                'message' => 'Import file is empty.',
-            ], 422);
-        }
-
-        $header = array_map(fn ($value) => $this->normalizeHeader($value), $rows[0]);
-
-        if ($header !== self::IMPORT_HEADERS) {
-            return response()->json([
-                'message' => 'Invalid header. Please use the required template columns in exact order.',
-                'required_header' => self::IMPORT_HEADERS,
-            ], 422);
-        }
-
-        $dataRows = array_slice($rows, 1);
         $createdCount = 0;
         $mergedCount = 0;
         $exampleCreatedCount = 0;
         $skippedCount = 0;
 
         try {
-            $groupedFlashes = $this->groupImportRows($dataRows, $skippedCount);
+            $groupedFlashes = $this->buildGroupedImportFlashes($file, $extension, $skippedCount);
         } catch (RuntimeException $exception) {
-            return response()->json([
+            $payload = [
                 'message' => $exception->getMessage(),
-            ], 422);
+            ];
+
+            if ($exception->getMessage() === 'Invalid header. Please use the required template columns in exact order.') {
+                $payload['required_header'] = self::IMPORT_HEADERS;
+            }
+
+            return response()->json($payload, 422);
         }
 
         $this->runWriteOperation(function () use ($groupedFlashes, &$createdCount, &$mergedCount, &$exampleCreatedCount): void {
@@ -405,69 +385,82 @@ class FlashController extends Controller
         return mb_strtolower($value, 'UTF-8');
     }
 
-    private function groupImportRows(array $dataRows, int &$skippedCount): array
+    private function buildGroupedImportFlashes(UploadedFile $file, string $extension, int &$skippedCount): array
     {
         $groupedFlashes = [];
+        $sawHeader = false;
 
-        foreach ($dataRows as $index => $cells) {
-            $line = $index + 2;
-            $normalized = array_pad($cells, count(self::IMPORT_HEADERS), null);
+        $this->processImportRows(
+            $file,
+            $extension,
+            function (array $header) use (&$sawHeader): void {
+                $sawHeader = true;
 
-            $vocabulary = $this->nullableTrim((string) $normalized[0]);
-            $pinyin = $this->nullableTrim((string) $normalized[1]);
-            $groupId = $this->nullableTrim((string) $normalized[2]);
-            $exampleSentence = $this->nullableTrim((string) $normalized[3]);
-            $examplePinyin = $this->nullableTrim((string) $normalized[4]);
-            $exampleTranslation = $this->nullableTrim((string) $normalized[5]);
+                if (array_map(fn ($value) => $this->normalizeHeader($value), $header) !== self::IMPORT_HEADERS) {
+                    throw new RuntimeException(
+                        'Invalid header. Please use the required template columns in exact order.',
+                    );
+                }
+            },
+            function (array $cells, int $line) use (&$groupedFlashes, &$skippedCount): void {
+                $normalized = array_pad($cells, count(self::IMPORT_HEADERS), null);
 
-            $isEmptyRow = $vocabulary === null
-                && $pinyin === null
-                && $groupId === null
-                && $exampleSentence === null
-                && $examplePinyin === null
-                && $exampleTranslation === null;
+                $vocabulary = $this->nullableTrim((string) $normalized[0]);
+                $pinyin = $this->nullableTrim((string) $normalized[1]);
+                $groupId = $this->nullableTrim((string) $normalized[2]);
+                $exampleSentence = $this->nullableTrim((string) $normalized[3]);
+                $examplePinyin = $this->nullableTrim((string) $normalized[4]);
+                $exampleTranslation = $this->nullableTrim((string) $normalized[5]);
 
-            if ($isEmptyRow) {
-                $skippedCount++;
-                continue;
-            }
+                $isEmptyRow = $vocabulary === null
+                    && $pinyin === null
+                    && $groupId === null
+                    && $exampleSentence === null
+                    && $examplePinyin === null
+                    && $exampleTranslation === null;
 
-            if ($vocabulary === null) {
-                throw new RuntimeException("Row {$line}: vocabulary is required.");
-            }
+                if ($isEmptyRow) {
+                    $skippedCount++;
+                    return;
+                }
 
-            if ($exampleSentence === null && ($examplePinyin !== null || $exampleTranslation !== null)) {
-                throw new RuntimeException(
-                    "Row {$line}: example_sentence is required when example columns are filled.",
-                );
-            }
+                if ($vocabulary === null) {
+                    throw new RuntimeException("Row {$line}: vocabulary is required.");
+                }
 
-            $importKey = $this->buildImportFlashKey($vocabulary, $groupId);
+                if ($exampleSentence === null && ($examplePinyin !== null || $exampleTranslation !== null)) {
+                    throw new RuntimeException(
+                        "Row {$line}: example_sentence is required when example columns are filled.",
+                    );
+                }
 
-            if (! isset($groupedFlashes[$importKey])) {
-                $groupedFlashes[$importKey] = [
-                    'vocabulary' => $vocabulary,
-                    'rows' => [],
-                    'group_id' => $groupId,
-                    'pinyin' => null,
-                    'examples' => [],
-                ];
-            }
+                $importKey = $this->buildImportFlashKey($vocabulary, $groupId);
 
-            $groupedFlashes[$importKey]['rows'][] = $line;
+                if (! isset($groupedFlashes[$importKey])) {
+                    $groupedFlashes[$importKey] = [
+                        'vocabulary' => $vocabulary,
+                        'group_id' => $groupId,
+                        'pinyin' => null,
+                        'examples' => [],
+                    ];
+                }
 
-            if ($groupedFlashes[$importKey]['pinyin'] === null && $pinyin !== null) {
-                $groupedFlashes[$importKey]['pinyin'] = $pinyin;
-            }
+                if ($groupedFlashes[$importKey]['pinyin'] === null && $pinyin !== null) {
+                    $groupedFlashes[$importKey]['pinyin'] = $pinyin;
+                }
 
-            if ($exampleSentence !== null) {
-                $groupedFlashes[$importKey]['examples'][] = [
-                    'line' => $line,
-                    'sentence' => $exampleSentence,
-                    'pinyin' => $examplePinyin,
-                    'translation_vi' => $exampleTranslation,
-                ];
-            }
+                if ($exampleSentence !== null) {
+                    $groupedFlashes[$importKey]['examples'][] = [
+                        'sentence' => $exampleSentence,
+                        'pinyin' => $examplePinyin,
+                        'translation_vi' => $exampleTranslation,
+                    ];
+                }
+            },
+        );
+
+        if (! $sawHeader) {
+            throw new RuntimeException('Import file is empty.');
         }
 
         return $groupedFlashes;
@@ -593,7 +586,22 @@ class FlashController extends Controller
         ]);
     }
 
-    private function parseCsvRows(UploadedFile $file): array
+    private function processImportRows(
+        UploadedFile $file,
+        string $extension,
+        callable $onHeader,
+        callable $onRow,
+    ): void {
+        if ($extension === 'csv') {
+            $this->processCsvRows($file, $onHeader, $onRow);
+
+            return;
+        }
+
+        $this->processXlsxRows($file, $onHeader, $onRow);
+    }
+
+    private function processCsvRows(UploadedFile $file, callable $onHeader, callable $onRow): void
     {
         $path = $file->getRealPath();
 
@@ -607,18 +615,25 @@ class FlashController extends Controller
             throw new RuntimeException('Cannot open uploaded csv file.');
         }
 
-        $rows = [];
+        $line = 0;
+        $processedHeader = false;
 
         while (($row = fgetcsv($handle)) !== false) {
-            $rows[] = $row;
+            $line++;
+
+            if (! $processedHeader) {
+                $onHeader($row);
+                $processedHeader = true;
+                continue;
+            }
+
+            $onRow($row, $line);
         }
 
         fclose($handle);
-
-        return $rows;
     }
 
-    private function parseXlsxRows(UploadedFile $file): array
+    private function processXlsxRows(UploadedFile $file, callable $onHeader, callable $onRow): void
     {
         $path = $file->getRealPath();
 
@@ -634,37 +649,54 @@ class FlashController extends Controller
         }
 
         $sharedStrings = $this->readSharedStrings($zip);
-        $sheetXml = $zip->getFromName('xl/worksheets/sheet1.xml');
         $zip->close();
 
-        if ($sheetXml === false) {
+        $sheetStream = sprintf('zip://%s#%s', $path, 'xl/worksheets/sheet1.xml');
+
+        if (! $this->zipEntryExists($path, 'xl/worksheets/sheet1.xml')) {
             throw new RuntimeException('Uploaded xlsx has no sheet1.');
         }
 
-        $xml = simplexml_load_string($sheetXml);
+        $reader = new \XMLReader();
 
-        if ($xml === false) {
+        if (! $reader->open($sheetStream, null, LIBXML_NONET | LIBXML_COMPACT)) {
             throw new RuntimeException('Uploaded xlsx is invalid.');
         }
 
-        $sheetDataNodes = $this->spreadsheetXPath($xml, '/s:worksheet/s:sheetData');
+        $line = 0;
+        $processedHeader = false;
 
-        if ($sheetDataNodes === []) {
-            throw new RuntimeException('Uploaded xlsx is invalid.');
-        }
+        try {
+            while ($reader->read()) {
+                if ($reader->nodeType !== \XMLReader::ELEMENT || $reader->localName !== 'row') {
+                    continue;
+                }
 
-        $rows = [];
+                $rowXml = $reader->readOuterXml();
 
-        foreach ($this->spreadsheetXPath($xml, '/s:worksheet/s:sheetData/s:row') as $rowNode) {
-            $row = [];
+                if ($rowXml === '') {
+                    continue;
+                }
 
-            foreach ($this->spreadsheetXPath($rowNode, './s:c') as $cell) {
-                $reference = (string) $cell['r'];
-                $columnIndex = $this->columnIndexFromReference($reference);
-                $row[$columnIndex] = $this->extractXlsxCellValue($cell, $sharedStrings);
-            }
+                $rowNode = simplexml_load_string($rowXml);
 
-            if ($row !== []) {
+                if ($rowNode === false) {
+                    throw new RuntimeException('Uploaded xlsx is invalid.');
+                }
+
+                $row = [];
+
+                foreach ($this->spreadsheetXPath($rowNode, './s:c') as $cell) {
+                    $reference = (string) $cell['r'];
+                    $columnIndex = $this->columnIndexFromReference($reference);
+                    $row[$columnIndex] = $this->extractXlsxCellValue($cell, $sharedStrings);
+                }
+
+                if ($row === []) {
+                    continue;
+                }
+
+                $line++;
                 $maxColumnIndex = max(array_keys($row));
                 $normalized = array_fill(0, $maxColumnIndex + 1, '');
 
@@ -672,11 +704,30 @@ class FlashController extends Controller
                     $normalized[$index] = $value;
                 }
 
-                $rows[] = $normalized;
+                if (! $processedHeader) {
+                    $onHeader($normalized);
+                    $processedHeader = true;
+                    continue;
+                }
+
+                $onRow($normalized, $line);
             }
+        } finally {
+            $reader->close();
+        }
+    }
+
+    private function zipEntryExists(string $path, string $entry): bool
+    {
+        $stream = @fopen(sprintf('zip://%s#%s', $path, $entry), 'rb');
+
+        if ($stream === false) {
+            return false;
         }
 
-        return $rows;
+        fclose($stream);
+
+        return true;
     }
 
     private function readSharedStrings(\ZipArchive $zip): array
